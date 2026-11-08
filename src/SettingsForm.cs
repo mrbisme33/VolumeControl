@@ -49,6 +49,7 @@ namespace VolumeControl
         private readonly TextBox _matchText = new TextBox { Dock = DockStyle.Fill };
         private readonly Button _addMatch = new Button { Text = "Add separate rule", AutoSize = true };
         private readonly TextBox _commandLine = new TextBox { ReadOnly = true, Dock = DockStyle.Fill };
+        private readonly ComboBox _ruleOutput = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
         private readonly TableLayoutPanel _editor;
 
         private bool _loading;
@@ -81,10 +82,11 @@ namespace VolumeControl
             StartPosition = FormStartPosition.CenterScreen;
 
             _list.SmallImageList = _icons;
-            _list.Columns.Add("App", 230);
-            _list.Columns.Add("Status", 130);
-            _list.Columns.Add("Rule", 120);
-            _list.Columns.Add("Command line contains", 180);
+            _list.Columns.Add("App", 180);
+            _list.Columns.Add("Status", 120);
+            _list.Columns.Add("Rule", 70);
+            _list.Columns.Add("Output", 170);
+            _list.Columns.Add("Command line contains", 130);
 
             var general = Grid(3);
             general.ColumnStyles[1] = new ColumnStyle(SizeType.Percent, 100);
@@ -116,6 +118,9 @@ namespace VolumeControl
             _editor.Controls.Add(Caption("Command line"), 0, 2);
             _editor.Controls.Add(_commandLine, 1, 2);
             _editor.SetColumnSpan(_commandLine, 3);
+            _editor.Controls.Add(Caption("Output"), 0, 3);
+            _editor.Controls.Add(_ruleOutput, 1, 3);
+            _editor.SetColumnSpan(_ruleOutput, 3);
             var editorBox = Group("Selected app", _editor);
 
             var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(10) };
@@ -141,6 +146,13 @@ namespace VolumeControl
             _list.SelectedIndexChanged += (s, e) => LoadEditor();
             _ruleMode.SelectedIndexChanged += (s, e) => EditRule();
             _ruleSlider.ValueChanged += (s, e) => EditRule();
+            _ruleOutput.SelectedIndexChanged += (s, e) =>
+            {
+                var row = SelectedRow;
+                if (_loading || row == null || !(_ruleOutput.SelectedItem is OutputChoice choice)) return;
+                row.Rule = _store.SetOutput(row.Exe, row.Match, choice.Id);
+                _engine.Reapply();
+            };
             _remove.Click += (s, e) => RemoveRule();
             _addMatch.Click += (s, e) => AddMatchRule();
 
@@ -255,6 +267,7 @@ namespace VolumeControl
                 var item = new ListViewItem(DisplayName(row.Exe)) { ImageKey = IconFor(row), Tag = row };
                 item.SubItems.Add(StatusText(row));
                 item.SubItems.Add(RuleText(row.Rule));
+                item.SubItems.Add(OutputText(row.Rule));
                 item.SubItems.Add(row.Match);
                 _list.Items.Add(item);
                 if (row.Key == selected) item.Selected = true;
@@ -278,6 +291,27 @@ namespace VolumeControl
         {
             if (rule == null || rule.Mode == RuleMode.UseDefault) return "Default";
             return rule.Mode == RuleMode.Custom ? rule.Percent + "%" : rule.Mode.ToString();
+        }
+
+        private string OutputText(AppRule rule)
+        {
+            if (!string.IsNullOrEmpty(rule?.CommandLineContains)) return "Same as app";
+            if (string.IsNullOrEmpty(rule?.OutputId)) return "Windows default";
+            return _engine.Outputs.FirstOrDefault(o => o.Id == rule.OutputId)?.Name ?? "Unavailable device";
+        }
+
+        private void LoadRuleOutputs(Row row)
+        {
+            if (_ruleOutput.DroppedDown) return;
+            string current = row.Rule?.OutputId ?? "";
+            _ruleOutput.Items.Clear();
+            _ruleOutput.Items.Add(new OutputChoice { Id = "", Name = "Windows default" });
+            foreach (var o in _engine.Outputs) _ruleOutput.Items.Add(new OutputChoice { Id = o.Id, Name = o.Name });
+            if (current.Length > 0 && _engine.Outputs.All(o => o.Id != current))
+                _ruleOutput.Items.Add(new OutputChoice { Id = current, Name = "Unavailable device" });
+            _ruleOutput.SelectedItem = _ruleOutput.Items.Cast<OutputChoice>().First(c => c.Id == current);
+            // Windows routes by program, so a command-line rule cannot have its own output.
+            _ruleOutput.Enabled = _engine.PerAppOutputAvailable && row.Exe != ConfigStore.SystemSoundsExe && row.Match.Length == 0;
         }
 
         private string IconFor(Row row)
@@ -316,6 +350,7 @@ namespace VolumeControl
                 _addMatch.Enabled = !isSystem;
                 _matchText.Enabled = !isSystem;
                 if (_commandLine.Text != row.CommandLine) _commandLine.Text = row.CommandLine;
+                LoadRuleOutputs(row);
             }
             _ruleSlider.Enabled = _ruleMode.SelectedIndex == (int)RuleMode.Custom;
             _ruleValue.Text = _ruleSlider.Enabled ? _ruleSlider.Value + "%" : "";

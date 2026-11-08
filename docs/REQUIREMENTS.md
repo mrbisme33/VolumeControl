@@ -45,6 +45,10 @@
 | O1 | The tray menu and settings window list active Windows outputs and show the current one. |
 | O2 | Choosing one makes it the Windows default output. Headphones, aux, Bluetooth, and WiiM endpoints are all covered when Windows exposes them as outputs. |
 | O3 | The list follows devices being added, removed, or changed elsewhere in Windows. |
+| O4 | Each app's rule can send it to a specific output, or follow the Windows default. |
+| O5 | If an app's chosen output is unavailable, the app follows the Windows default until it returns. |
+| O6 | Pause, Exit, and Uninstall return open apps to the Windows default output. |
+| O7 | Output is per program, because Windows stores it that way. Command-line rules (P6) cannot have their own output. |
 
 ## Behavior
 | ID | Requirement |
@@ -67,5 +71,4 @@
 - Per-window or per-tab control, beyond the separate Chrome instance in P6
 - Hotkeys
 - Profiles, such as Work and Gaming
-- Sending individual apps to different output devices
 - Casting directly to network speakers that Windows does not list as an output

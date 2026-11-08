@@ -19,6 +19,8 @@ namespace VolumeControl
         [DataMember(Name = "commandLineContains", Order = 2)] public string CommandLineContains = "";
         [DataMember(Name = "mode", Order = 3)] public string ModeText = nameof(RuleMode.UseDefault);
         [DataMember(Name = "percent", Order = 4)] public int Percent = 100;
+        /// <summary>Windows endpoint id, or empty to follow the Windows default output (O4).</summary>
+        [DataMember(Name = "outputId", Order = 5)] public string OutputId = "";
 
         public RuleMode Mode
         {
@@ -81,6 +83,7 @@ namespace VolumeControl
                     foreach (var r in loaded.Rules)
                     {
                         if (r.CommandLineContains == null) r.CommandLineContains = "";
+                        if (r.OutputId == null) r.OutputId = "";
                         r.Percent = Clamp(r.Percent);
                     }
                     loaded.DefaultPercent = Clamp(loaded.DefaultPercent);
@@ -157,6 +160,24 @@ namespace VolumeControl
                 }
                 rule.Mode = mode;
                 rule.Percent = Clamp(percent);
+                Save();
+                return rule;
+            }
+        }
+
+        /// <summary>Sets the rule's output, creating a Use-default rule if the app has none yet.</summary>
+        public AppRule SetOutput(string exe, string match, string outputId)
+        {
+            lock (Sync)
+            {
+                string key = AppRule.MakeKey(exe, match);
+                var rule = Data.Rules.FirstOrDefault(r => r.Key == key);
+                if (rule == null)
+                {
+                    rule = new AppRule { Exe = exe, CommandLineContains = match ?? "" };
+                    Data.Rules.Add(rule);
+                }
+                rule.OutputId = outputId ?? "";
                 Save();
                 return rule;
             }

@@ -9,7 +9,7 @@ namespace VolumeControl
 {
     internal sealed class SessionSnapshot
     {
-        public string Exe, Path, CommandLine;
+        public string Exe, Path, CommandLine, DeviceId;
         public bool IsSystem, IsActive, Muted;
         public int Percent;
     }
@@ -45,6 +45,9 @@ namespace VolumeControl
         private bool _paused;
         private volatile List<SessionSnapshot> _snapshot = new List<SessionSnapshot>();
         private volatile List<OutputDevice> _outputs = new List<OutputDevice>();
+        private readonly Dictionary<uint, string> _routes = new Dictionary<uint, string>();
+        private AppRouting _routing;
+        private volatile bool _routingAvailable;
 
         public event Action Changed;
         public event Action<string> AutoMuted;
@@ -52,6 +55,7 @@ namespace VolumeControl
         public bool Paused => Volatile.Read(ref _paused);
         public IReadOnlyList<SessionSnapshot> Sessions => _snapshot;
         public IReadOnlyList<OutputDevice> Outputs => _outputs;
+        public bool PerAppOutputAvailable => _routingAvailable;
 
         /// <summary>Makes a device the Windows default output for all roles.</summary>
         public void SetOutput(string id) => Post(() =>
@@ -117,6 +121,8 @@ namespace VolumeControl
             {
                 _enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
                 _enumerator.RegisterEndpointNotificationCallback(_deviceWatcher);
+                _routing = new AppRouting();
+                _routingAvailable = _routing.Available;
                 ScanAll();
             });
         }
@@ -204,8 +210,13 @@ namespace VolumeControl
                 Unregister(_devices[gone]);
                 _devices.Remove(gone);
             }
+            RefreshOutputs(); // Routing below needs to know which outputs exist.
             foreach (var d in _devices.Values) ScanSessions(d);
-            RefreshOutputs();
+            foreach (var s in AllSessions.ToList())
+            {
+                try { ApplyRoute(s); }
+                catch (Exception) { }
+            }
             Publish();
         }
 
@@ -213,7 +224,7 @@ namespace VolumeControl
         {
             var iid = typeof(IAudioSessionManager2).GUID;
             if (device.Activate(ref iid, ClsCtxAll, IntPtr.Zero, out object obj) != 0) return;
-            var entry = new DeviceEntry(this, (IAudioSessionManager2)obj);
+            var entry = new DeviceEntry(this, (IAudioSessionManager2)obj, id);
             entry.Manager.RegisterSessionNotification(entry);
             _devices[id] = entry;
         }
@@ -239,6 +250,7 @@ namespace VolumeControl
                         continue;
                     }
                     var tracked = CreateSession(control, state);
+                    tracked.DeviceId = device.Id;
                     device.Sessions[id] = tracked;
                     control.RegisterAudioSessionNotification(tracked);
                     Apply(tracked, firstTime: true);
@@ -256,13 +268,15 @@ namespace VolumeControl
         {
             bool system = control.IsSystemSoundsSession() == 0;
             string exe = ConfigStore.SystemSoundsExe, path = null, commandLine = "";
+            uint pid = 0;
             if (!system)
             {
-                control.GetProcessId(out uint pid);
+                control.GetProcessId(out pid);
                 ProcessInfo.Read(pid, out exe, out path, out commandLine);
             }
             return new TrackedSession(this, control)
             {
+                Pid = pid,
                 Exe = exe,
                 Path = path,
                 CommandLine = commandLine,
@@ -328,6 +342,7 @@ namespace VolumeControl
         private void Apply(TrackedSession s, bool firstTime)
         {
             if (_paused || !InScope(s)) return;
+            ApplyRoute(s);
             if (!Resolve(s, out bool mute, out float level, out bool fromDefault))
             {
                 if (s.Managed) RestoreOne(s); // Its rule was removed, so hand it back.
@@ -353,23 +368,46 @@ namespace VolumeControl
                 AutoMuted?.Invoke(s.Exe);
         }
 
+        /// <summary>Routes the session's process to its rule's output. A missing device means Windows default.</summary>
+        private void ApplyRoute(TrackedSession s)
+        {
+            if (_paused || s.IsSystem || s.Pid == 0 || !InScope(s) || _routing == null || !_routing.Available) return;
+            // Windows stores this per program, so only the exe-wide rule can choose an output.
+            string wanted = _store.GetByKey(AppRule.MakeKey(s.Exe, ""))?.OutputId;
+            if (string.IsNullOrEmpty(wanted) || !_outputs.Any(o => o.Id == wanted)) wanted = null;
+
+            _routes.TryGetValue(s.Pid, out string current);
+            if (wanted == current) return;
+            if (!_routing.Set(s.Pid, wanted)) return;
+            if (wanted == null) _routes.Remove(s.Pid);
+            else _routes[s.Pid] = wanted;
+            s.Managed = true;
+        }
+
         private void RestoreManaged(HashSet<string> onlyTheseExes)
         {
-            foreach (var s in AllSessions)
+            foreach (var s in AllSessions.ToList())
             {
                 bool wanted = onlyTheseExes == null ? s.Managed : (!s.IsSystem && onlyTheseExes.Contains(s.Exe));
                 if (!wanted) continue;
-                try { RestoreOne(s); }
+                try
+                {
+                    // The uninstaller starts with no route history, so it goes by the saved rule.
+                    if (onlyTheseExes != null && !string.IsNullOrEmpty(_store.GetByKey(AppRule.MakeKey(s.Exe, ""))?.OutputId))
+                        _routes[s.Pid] = "";
+                    RestoreOne(s);
+                }
                 catch (Exception) { }
             }
         }
 
-        private static void RestoreOne(TrackedSession s)
+        private void RestoreOne(TrackedSession s)
         {
             var ctx = OurContext;
             s.Volume.SetMasterVolume(1f, ref ctx);
             s.Volume.SetMute(false, ref ctx);
             s.Managed = false;
+            if (_routes.ContainsKey(s.Pid) && _routing.Set(s.Pid, null)) _routes.Remove(s.Pid);
         }
 
         /// <summary>P7: a change from the Volume Mixer becomes the app's saved rule.</summary>
@@ -410,6 +448,7 @@ namespace VolumeControl
                         Exe = s.Exe,
                         Path = s.Path,
                         CommandLine = s.CommandLine,
+                        DeviceId = s.DeviceId,
                         IsSystem = s.IsSystem,
                         IsActive = s.IsActive,
                         Muted = muted,
@@ -428,10 +467,13 @@ namespace VolumeControl
             public readonly IAudioSessionManager2 Manager;
             public readonly Dictionary<string, TrackedSession> Sessions = new Dictionary<string, TrackedSession>();
 
-            public DeviceEntry(AudioEngine engine, IAudioSessionManager2 manager)
+            public readonly string Id;
+
+            public DeviceEntry(AudioEngine engine, IAudioSessionManager2 manager, string id)
             {
                 _engine = engine;
                 Manager = manager;
+                Id = id;
             }
 
             public int OnSessionCreated(IntPtr newSession)
@@ -446,7 +488,8 @@ namespace VolumeControl
             private readonly AudioEngine _engine;
             public readonly IAudioSessionControl2 Control;
             public readonly ISimpleAudioVolume Volume;
-            public string Exe, Path, CommandLine;
+            public string Exe, Path, CommandLine, DeviceId;
+            public uint Pid;
             public bool IsSystem, IsActive, Managed;
             public int FirstSeenTick;
 

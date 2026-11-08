@@ -84,7 +84,7 @@ namespace VolumeControl
             var sb = new StringBuilder();
             foreach (var s in engine.Sessions.OrderBy(x => x.Exe))
                 sb.AppendLine(string.Join("\t", s.Exe, s.IsActive ? "active" : "inactive",
-                    s.Muted ? "muted" : "unmuted", s.Percent + "%", s.CommandLine));
+                    s.Muted ? "muted" : "unmuted", s.Percent + "%", s.DeviceId, s.CommandLine));
             foreach (var o in engine.Outputs)
                 sb.AppendLine(string.Join("\t", "OUTPUT", o.IsDefault ? "default" : "-", o.Name, o.Id));
             File.WriteAllText(path, sb.ToString());
